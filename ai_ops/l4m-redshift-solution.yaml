@@ -194,6 +194,3 @@ Outputs:
   RedshiftL4MSagemakerRole:
     Description: Role of Sagemaker NotebookInstance
     Value: !Ref RedshiftL4MSagemakerRole
-  SampleURL:
-    Description: Just a URL to see what happens.
-    Value: https://google.com/

@@ -1,0 +1,51 @@
+{
+    "database_type": "redshift",
+    "detector_name": "l4m-custom-connector-detector",
+    "detector_description": "A quick sample config of how to use L4M.",
+    "detector_frequency": "PT1H",
+    "timestamp_column": {
+        "ColumnFormat": "yyyy-MM-dd HH:mm:ss",
+        "ColumnName": "timestamp"
+    },
+    "dimension_list": [
+        "platform",
+        "marketplace"
+    ],
+    "metrics_set": [
+        {
+            "AggregationFunction": "SUM",
+            "MetricName": "views"
+        },
+        {
+            "AggregationFunction": "SUM",
+            "MetricName": "revenue"
+        }
+    ],
+    "metric_source": {
+        "S3SourceConfig": {
+            "FileFormatDescriptor": {
+                "CsvFormatDescriptor": {
+                    "Charset": "UTF-8",
+                    "ContainsHeader": true,
+                    "Delimiter": ",",
+                    "FileCompression": "NONE",
+                    "QuoteSymbol": "\""
+                }
+            },
+            "HistoricalDataPathList": [
+                "s3://id-ml-ops2-inputbucket-18vaudty8qtec/ecommerce/backtest/"
+            ],
+            "RoleArn": "arn:aws:iam::059124553121:role/id-ml-ops2-LookoutForMetricsRole-IZ5PL6M7YKR1",
+            "TemplatedPathList": [
+                    ""
+                ]
+        }
+    },
+    "s3_bucket": "",
+    "alert_name": "alerter",
+    "alert_threshold": 1,
+    "alert_description": "Exports anomalies into s3 for visualization",
+    "alert_lambda_arn": "",
+    "offset": 300,
+    "secret_name": "redshift-l4mintegration"
+}

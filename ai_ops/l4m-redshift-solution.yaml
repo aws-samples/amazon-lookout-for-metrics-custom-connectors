@@ -1,0 +1,199 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Custom Connector for Redshift to Lookout for Metrics'
+Parameters:
+  SecretName:
+    Type: String
+    Default: redshift-l4mintegration
+    Description: The name of your secrets for Redshift connectivity
+  RedshiftCluster:
+    Type: String
+    Default: UPDATE_ME
+    Description: The name of your Redshift cluster
+  RedshiftSecret:
+    Type: String
+    Default: UPDATE_ME
+    Description: The name of the secrets being used for the solution.
+  SolutionRepository:
+    Type: String
+    Default: https://github.com/aws-samples/amazon-lookout-for-metrics-custom-connectors.git
+    Description: The public Git repository you are using
+
+Resources:
+  S3LambdaBucket:
+    Type: AWS::S3::Bucket
+
+  RedshiftL4MSagemakerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+              - redshift.amazonaws.com
+              - sagemaker.amazonaws.com
+          Sid: ''
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonLookoutMetricsFullAccess
+        - arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchEventsFullAccess
+      Policies:
+        - PolicyName: SageMakerCloudFormationDeployPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStackResources
+                  - cloudformation:UpdateStack
+                Resource: 
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/custom-rs-connector*'
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/custom-rs-connector-crawl*'
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31"
+        - PolicyName: SageMakerRedshiftIntegrationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift:ModifyClusterIamRoles
+                  - redshift:CreateCluster
+                  - redshift:DescribeClusters
+                Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+        - PolicyName: SageMakerRedshiftDataAccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift-data:BatchExecuteStatement
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:CancelStatement
+                  - redshift-data:ListStatements
+                  - redshift-data:GetStatementResult
+                  - redshift-data:DescribeStatement
+                  - redshift-data:ListDatabases
+                  - redshift-data:ListSchemas
+                  - redshift-data:ListTables
+                  - redshift-data:DescribeTable
+                Resource: "*"
+        - PolicyName: BucketAccessPolicyForNotebook
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${S3LambdaBucket}
+                  - !Sub arn:aws:s3:::${S3LambdaBucket}/*
+        - PolicyName: BucketCreatePolicyForNotebook
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketNotification
+                  - s3:DeleteBucket
+                  - s3:DeleteBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:DescribeBucketPolicy
+                Resource: "*"
+        - PolicyName: IAMAccessPolicyForNotebook
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListPolicies
+                  - iam:ListRolePolicies
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                Resource: "*"
+        - PolicyName: LambdaPublishingPolicyForNotebook
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:AddPermission
+                  - lambda:GetLayerVersion
+                  - lambda:GetFunction
+                  - lambda:DeleteFunction
+                  - lambda:RemovePermission
+                  - lambda:PublishLayerVersion
+                  - lambda:DeleteLayerVersion
+                  - lambda:ListLayerVersions
+                  - lambda:ListLayers
+                  - lambda:AddLayerVersionPermission
+                  - lambda:RemoveLayerVersionPermission
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionConfiguration
+                Resource: "*"
+
+
+  SAMDeploySageMakerInstance:
+    Type: "AWS::SageMaker::NotebookInstance"
+    DependsOn: S3LambdaBucket
+    Properties:
+      InstanceType: "ml.t2.large"
+      RoleArn: !GetAtt RedshiftL4MSagemakerRole.Arn
+      LifecycleConfigName: !GetAtt AmazonL4MLifecycleConfig.NotebookInstanceLifecycleConfigName
+
+  AmazonL4MLifecycleConfig:
+    Type: "AWS::SageMaker::NotebookInstanceLifecycleConfig"
+    Properties:
+      OnStart:
+        - Content:
+            Fn::Base64:
+              !Sub |
+              #!/bin/bash
+              sudo -u ec2-user -i <<'EOF'
+              cd /home/ec2-user/SageMaker/
+              git clone ${SolutionRepository}
+              cd amazon-lookout-for-metrics-custom-connectors/ai_ops/
+              # Update Params before SAM to have the correct Secret Name
+              tmp=$(mktemp)
+              jq '.secret_name = "${SecretName}"' params.json > "$tmp" && mv "$tmp" params.json
+              nohup sh deploy_custom_connector.sh "${S3LambdaBucket}" "${RedshiftCluster}" "${RedshiftSecret}" "${RedshiftL4MSagemakerRole}"&
+              EOF
+
+Outputs:
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
+  S3LambdaBucket:
+    Description: The S3 bucket name for storing lambda functions
+    Value: !Ref S3LambdaBucket
+  SAMDeploySageMakerInstance:
+    Description: 'Sagemaker notebook instance'
+    Value: !Ref SAMDeploySageMakerInstance
+  RedshiftL4MSagemakerRole:
+    Description: Role of Sagemaker NotebookInstance
+    Value: !Ref RedshiftL4MSagemakerRole
+  SampleURL:
+    Description: Just a URL to see what happens.
+    Value: https://google.com/

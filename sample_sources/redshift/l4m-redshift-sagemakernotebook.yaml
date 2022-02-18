@@ -1,0 +1,598 @@
+---
+# Copyright 2018 widdix GmbH
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# Modifications:
+#     10-16-2020 - Saunak Chandra
+#        1. Initial revision with Redshift Data API, Secrets Manager, Sagemaker Jupyter Notebook.
+#     12-30-2021 - Chris King
+#        1. Revised this to serve as a base for how to import data from Redshift into Lookout for Metrics.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Building Custom Connectors for Lookout for Metrics - Redshift'
+Resources:
+  S3ContentBucket:
+    Type: AWS::S3::Bucket
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: '10.71.0.0/16'
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+      - Key: Name
+        Value: '10.71.0.0/16'
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+      - Key: Name
+        Value: '10.71.0.0/16'
+  VPCGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  SubnetAPublic:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: '10.71.0.0/20'
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'A public'
+      - Key: Reach
+        Value: public
+  SubnetAPrivate:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: '10.71.16.0/20'
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'A private'
+      - Key: Reach
+        Value: private
+  SubnetBPublic:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: '10.71.32.0/20'
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'B public'
+      - Key: Reach
+        Value: public
+  SubnetBPrivate:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: '10.71.48.0/20'
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'B private'
+      - Key: Reach
+        Value: private
+  RouteTablePublic: # should be RouteTableAPublic, but logical id was not changed for backward compatibility
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'A Public'
+  RouteTablePrivate: # should be RouteTableAPrivate, but logical id was not changed for backward compatibility
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'A Private'
+  RouteTableBPublic:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'B Public'
+  RouteTableBPrivate:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: 'B Private'
+  RouteTableAssociationAPublic:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetAPublic
+      RouteTableId: !Ref RouteTablePublic
+  RouteTableAssociationAPrivate:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetAPrivate
+      RouteTableId: !Ref RouteTablePrivate
+  RouteTableAssociationBPublic:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBPublic
+      RouteTableId: !Ref RouteTableBPublic
+  RouteTableAssociationBPrivate:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBPrivate
+      RouteTableId: !Ref RouteTableBPrivate
+  RouteTablePublicInternetRoute: # should be RouteTablePublicAInternetRoute, but logical id was not changed for backward compatibility
+    Type: 'AWS::EC2::Route'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+  RouteTablePublicBInternetRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTableBPublic
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+  NetworkAclPublic:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Public
+  NetworkAclPrivate:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Private
+  SubnetNetworkAclAssociationAPublic:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetAPublic
+      NetworkAclId: !Ref NetworkAclPublic
+  SubnetNetworkAclAssociationAPrivate:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetAPrivate
+      NetworkAclId: !Ref NetworkAclPrivate
+  SubnetNetworkAclAssociationBPublic:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBPublic
+      NetworkAclId: !Ref NetworkAclPublic
+  SubnetNetworkAclAssociationBPrivate:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBPrivate
+      NetworkAclId: !Ref NetworkAclPrivate
+  NetworkAclEntryInPublicAllowAll:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: '0.0.0.0/0'
+  NetworkAclEntryOutPublicAllowAll:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPublic
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: '0.0.0.0/0'
+  NetworkAclEntryInPrivateAllowVPC:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: '0.0.0.0/0'
+  NetworkAclEntryOutPrivateAllowVPC:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAclPrivate
+      RuleNumber: 99
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: '0.0.0.0/0'
+  NAT:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - EIP
+        - AllocationId
+      SubnetId:
+        Ref: SubnetAPublic
+      Tags:
+        - Key: foo
+          Value: bar
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+        PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+                - Effect: Allow
+                  Principal: '*'
+                  Action:
+                    - 's3:GetObject'
+                  Resource: '*'
+        RouteTableIds:
+            - !Ref RouteTablePublic
+            - !Ref RouteTableBPublic
+            - !Ref RouteTablePrivate
+            - !Ref RouteTableBPrivate
+        ServiceName:  !Join [ "", ["com.amazonaws.",!Ref 'AWS::Region',".s3"] ]
+        VpcId: !Ref VPC
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !Ref VPC
+  RouteANAT:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTablePrivate
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NAT
+  RouteBNAT:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTableBPrivate
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NAT
+
+  RedshiftSG:
+    Properties:
+      GroupDescription: Redshift security group
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: '-1'
+      VpcId:
+        Ref: VPC
+    Type: AWS::EC2::SecurityGroup
+
+
+  InboundRule:
+    Properties:
+      FromPort: 0
+      GroupId:
+        Fn::GetAtt:
+        - RedshiftSG
+        - GroupId
+      IpProtocol: '-1'
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - RedshiftSG
+        - GroupId
+      ToPort: 65535
+    Type: AWS::EC2::SecurityGroupIngress
+
+  RedshiftSubnetGroup:
+    Properties:
+      Description: Subnet Group for redshift
+      SubnetIds:
+        - !Ref SubnetAPublic
+        - !Ref SubnetBPublic
+    Type: AWS::Redshift::ClusterSubnetGroup
+
+  
+
+  RedshiftSecret:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: 'redshift-l4mintegration'
+      Description: "This is a Secrets Manager secret for Redshift"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: "password"
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'''
+      Tags:
+        -
+          Key: RedshiftDataFullAccess
+          Value: "None"
+
+
+  RedshiftCluster:
+    DependsOn: S3ContentBucket
+    Properties:
+      ClusterSubnetGroupName:
+        Ref: RedshiftSubnetGroup
+      ClusterType: "multi-node"
+      NodeType: "dc2.large"
+      NumberOfNodes: 2
+      DBName: l4mdemo
+      Port: 8192
+      PubliclyAccessible: true
+      IamRoles:
+        - !GetAtt S3ContentBucketAccessRole.Arn
+      MasterUserPassword: !Join ['', ['{{resolve:secretsmanager:', !Ref RedshiftSecret, ':SecretString:password}}' ]]
+      MasterUsername: !Join ['', ['{{resolve:secretsmanager:', !Ref RedshiftSecret, ':SecretString:username}}' ]]
+      ClusterParameterGroupName:
+        Ref: RedshiftClusterParameterGroup
+      VpcSecurityGroupIds:
+      - Ref: RedshiftSG
+    Type: AWS::Redshift::Cluster
+
+  S3ContentBucketAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement: 
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - redshift.amazonaws.com
+            Action:
+              - sts:AssumeRole
+  S3ContentBucketRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: RawDataBucketRolePolicy
+      PolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - 
+            Effect: Allow
+            Action: 
+              - 's3:Get*'
+              - 's3:List*'
+            Resource:
+                  - !Sub arn:aws:s3:::${S3ContentBucket}
+                  - !Sub arn:aws:s3:::${S3ContentBucket}/*
+          - 
+            Effect: Allow
+            Action: cloudwatch:*
+            Resource: "*"
+      Roles:
+        - !Ref S3ContentBucketAccessRole
+
+  RedshiftClusterParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: "Cluster parameter group"
+      ParameterGroupFamily: "redshift-1.0"
+      Parameters:
+      - ParameterName: "enable_user_activity_logging"
+        ParameterValue: "true"
+      - ParameterName: "require_ssl"
+        ParameterValue: "true"
+      - ParameterName: "wlm_json_configuration"
+        ParameterValue: "[ {\"query_concurrency\" : 5,\"query_group\" : [ \"ingest\" ],\"queue_type\" : \"manual\"}, {\"query_concurrency\" : 3,\"queue_type\" : \"manual\"}, {\"short_query_queue\" : true}]"
+
+  RedshiftSagemakerRole:
+    DependsOn: RedshiftCluster
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+              - sagemaker.amazonaws.com
+          Sid: ''
+      Path: /
+      Policies:
+        - PolicyName: RedshiftClusterPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift:ModifyClusterIamRoles
+                  - redshift:CreateCluster
+                  - redshift:DescribeClusters
+                Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+        - PolicyName: RedshiftDataPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift-data:BatchExecuteStatement
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:CancelStatement
+                  - redshift-data:ListStatements
+                  - redshift-data:GetStatementResult
+                  - redshift-data:DescribeStatement
+                  - redshift-data:ListDatabases
+                  - redshift-data:ListSchemas
+                  - redshift-data:ListTables
+                  - redshift-data:DescribeTable
+                Resource: '*'
+        - PolicyName: BucketAccessPolicyForSM
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${S3ContentBucket}
+                  - !Sub arn:aws:s3:::${S3ContentBucket}/*
+        - PolicyName: SecretManagerAccessForSM
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:*
+                Resource: !Ref RedshiftSecret
+        - PolicyName: IAMAccessPolicyForSM
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                Resource: "*"
+
+
+  SagemakerNotebookInstance:
+    Type: "AWS::SageMaker::NotebookInstance"
+    Properties:
+      InstanceType: "ml.t2.large"
+      RoleArn: !GetAtt RedshiftSagemakerRole.Arn
+      LifecycleConfigName: !GetAtt AmazonSMRedshiftLifecycleConfig.NotebookInstanceLifecycleConfigName
+    
+
+  AmazonSMRedshiftLifecycleConfig:
+    Type: "AWS::SageMaker::NotebookInstanceLifecycleConfig"
+    DependsOn: EnvSetup
+    Properties:
+      OnStart:
+        - Content:
+            Fn::Base64:
+              !Sub |
+              #!/bin/bash
+              sudo -u ec2-user -i <<'EOF'
+              cd /home/ec2-user/SageMaker/
+              git clone https://github.com/aws-samples/amazon-lookout-for-metrics-custom-connectors.git
+              cd amazon-lookout-for-metrics-custom-connectors/sample_sources/redshift/
+              nohup sh deploy_redshift_environment.sh ${S3ContentBucket} ${S3ContentBucketAccessRole}
+              EOF
+
+  SecretsUpdateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt 'LambdaExecutionRole.Arn'
+      FunctionName: !Join ['-', ['update_secret', !Ref 'AWS::StackName']]
+      MemorySize: 2048
+      Runtime: python3.7
+      Timeout: 900
+      Handler: index.handler
+      Code:
+        ZipFile:
+          Fn::Sub:
+          - |-
+           import json
+           import boto3
+           import os
+           import logging
+           import cfnresponse
+
+           LOGGER = logging.getLogger()
+           LOGGER.setLevel(logging.INFO)
+
+           ROLE_ARN = '${Role}'
+           SECRET = '${Secret}'
+           CLUSTER_ENDPOINT = '${Endpoint}'
+           CLUSTER_ID = CLUSTER_ENDPOINT.split('.')[0]
+           DBNAME = 'l4mdemo'
+
+           def handler(event, context):
+
+               # Get CloudFormation-specific parameters, if they exist
+               cfn_stack_id = event.get('StackId')
+               cfn_request_type = event.get('RequestType')
+
+               #update Secrets Manager secret with host and port
+               sm = boto3.client('secretsmanager')
+               sec = json.loads(sm.get_secret_value(SecretId=SECRET)['SecretString'])
+               sec['dbClusterIdentifier'] = CLUSTER_ID
+               sec['db'] = DBNAME
+               sec['host'] = CLUSTER_ENDPOINT.split(':')[0]
+               sec['port'] = 8192
+               newsec = json.dumps(sec)
+               response = sm.update_secret(SecretId=SECRET, SecretString=newsec)
+
+               # Send a response to CloudFormation pre-signed URL
+               cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                   'Message': 'Secrets upated'
+                   },
+                   context.log_stream_name)
+
+               return {
+                   'statusCode': 200,
+                   'body': json.dumps('Secrets updated')
+               }
+
+          - {
+            Role : !GetAtt RedshiftSagemakerRole.Arn,
+            Endpoint: !GetAtt RedshiftCluster.Endpoint.Address,
+            Secret: !Ref RedshiftSecret
+            }
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+      Policies:
+        - PolicyName: SecretManagerAccessForSM
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:*
+                Resource: !Ref RedshiftSecret
+
+  EnvSetup:
+    Type: 'Custom::EnvSetup'
+    DependsOn:
+      - LambdaExecutionRole
+    Properties:
+      ServiceToken: !GetAtt
+        - SecretsUpdateFunction
+        - Arn
+
+Outputs:
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
+  RedshiftCluster:
+    Description: 'Redshift cluster'
+    Value: !Sub "${RedshiftCluster}"
+  RedshiftSecret:
+    Description: 'AWS Secrets Manager secret for Redshift cluster'
+    Value: !Ref RedshiftSecret
+  BasicNotebookInstanceId:
+    Description: 'Sagemaker notebook instance'
+    Value: !Ref SagemakerNotebookInstance

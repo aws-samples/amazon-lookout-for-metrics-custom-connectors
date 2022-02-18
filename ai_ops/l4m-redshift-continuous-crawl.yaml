@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Timeout: 300
+
+Parameters:
+  InputBucketName:
+    Type: String
+    Default: UPDATE_ME
+    Description: The name of the bucket where input data is stored.
+  RedshiftCluster:
+    Type: String
+    Default: UPDATE_ME
+    Description: Redshift cluster that was created earlier.
+  RedshiftSecret:
+    Type: String
+    Default: UPDATE_ME
+    Description: Secrets used for authentication to Redshfit cluster.
+
+Resources:
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      ContentUri: lambdas/shared/
+      CompatibleRuntimes:
+        - python3.9
+      RetentionPolicy: Delete
+
+  RedshiftContinuousCrawl:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/redshift/redshift-continuous-crawl
+      Handler: redshift-continuous-crawl.lambda_handler
+      Runtime: python3.9
+      Environment:
+        Variables:
+          InputBucketName: !Ref InputBucketName
+      Layers:
+        - !Ref SharedLayer
+      Policies:
+        - Statement:
+          - Sid: LambdaS3Access
+            Effect: Allow
+            Action:
+              - 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${InputBucketName}
+              - !Sub arn:aws:s3:::${InputBucketName}/*
+          - Sid: SAMRedshiftModifyPolicy
+            Effect: Allow
+            Action:
+            - redshift:ModifyClusterIamRoles
+            - redshift:CreateCluster
+            - redshift:DescribeClusters
+            Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+          - Sid: SAMRedshiftDataAccessPolicy
+            Effect: Allow
+            Action:
+            - redshift-data:BatchExecuteStatement
+            - redshift-data:ExecuteStatement
+            - redshift-data:CancelStatement
+            - redshift-data:ListStatements
+            - redshift-data:GetStatementResult
+            - redshift-data:DescribeStatement
+            - redshift-data:ListDatabases
+            - redshift-data:ListSchemas
+            - redshift-data:ListTables
+            - redshift-data:DescribeTable
+            Resource: "*"
+          - Sid: SecretManagerHistoricalCrawler
+            Effect: Allow
+            Action:
+            - secretsmanager:*
+            Resource: !Ref RedshiftSecret
+        - AWSLambdaExecute
+      Events:
+        InvocationLevel:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 * * * ? *)

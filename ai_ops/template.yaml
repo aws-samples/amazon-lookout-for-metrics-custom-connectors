@@ -1,0 +1,340 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+
+Globals:
+  Function:
+    Timeout: 900
+
+Parameters:
+  RedshiftCluster:
+    Type: String
+    Default: UPDATE_ME
+    Description: Redshift cluster that was created earlier.
+  RedshiftSecret:
+    Type: String
+    Default: UPDATE_ME
+    Description: Secrets used for authentication to Redshfit cluster.
+  SageMakerNotebookRole:
+    Type: String
+    Default: UPDATE_ME
+    Description: Role for the currently running notebook
+
+Resources:
+  InputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-${AWS::Region}-${AWS::AccountId}"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W41
+            reason: S3 will not be encrypted for the porpose of this block
+          - id: W35
+            reason: S3 will not have logging for the porpose of this block
+          - id: W51
+            reason: S3 will not have a policy for the porpose of this block
+  SageMakerNotebookS3BucketWritePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SageMakerNotebookS3BucketWritePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Action:
+            - 's3:*'
+          Resource:
+            - !Sub arn:aws:s3:::${InputBucket}
+            - !Sub arn:aws:s3:::${InputBucket}/*
+      Roles:
+        - !Ref SageMakerNotebookRole
+
+  LookoutS3Policy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref InputBucket
+      PolicyDocument:
+        Statement:
+          - Sid: LookoutForMetricsAccess
+            Effect: Allow
+            Principal:
+              Service: 'lookoutmetrics.amazonaws.com'
+            Action:
+              - 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${InputBucket}
+              - !Sub arn:aws:s3:::${InputBucket}/*
+          - Sid: LambdaAccess
+            Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action:
+              - 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${InputBucket}
+              - !Sub arn:aws:s3:::${InputBucket}/*
+          - Sid: SageMakerAccess
+            Effect: Allow
+            Principal:
+              Service: 'sagemaker.amazonaws.com'
+            Action:
+              - 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${InputBucket}
+              - !Sub arn:aws:s3:::${InputBucket}/*
+  TriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub lambda.${AWS::Region}.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - iam:PassRole
+                  - s3:GetBucketAcl
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  S3Lambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/s3lambda/
+      Handler: parse.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt TriggerRole.Arn
+      Environment:
+        Variables:
+          STEP_FUNCTIONS_ARN: !Ref DeployStateMachine
+          PARAMS_FILE: "params.json"
+      Events:
+        S3Bucket:
+          Type: S3
+          Properties:
+            Bucket: !Ref InputBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                - Name: prefix
+                  Value: "params.json"
+  SharedLayer:
+      Type: AWS::Serverless::LayerVersion
+      Properties:
+        ContentUri: lambdas/shared/
+        CompatibleRuntimes:
+          - python3.9
+        RetentionPolicy: Delete
+
+  LookoutForMetricsRole:
+    Type: AWS::IAM::Role
+    DependsOn: InputBucket
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - lookoutmetrics.amazonaws.com
+                - redshift.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonLookoutMetricsFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+      Policies:
+        - PolicyName: LookoutForMetricsS3BucketAccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: 
+                  - !Sub arn:aws:s3:::${InputBucket}
+                  - !Sub arn:aws:s3:::${InputBucket}/*
+# ------------------------
+# Create Steps Definition
+# ------------------------
+  RedshiftHistoricalCrawl:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/redshift/redshift-historical-crawl
+      Handler: redshift-historical-crawl.lambda_handler
+      Runtime: python3.9
+      Layers:
+        - !Ref SharedLayer
+      Policies:
+        - AWSLambdaExecute
+        - Statement:
+          - Sid: HistoricalCrawlS3AccessPolicy
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource: "*"
+        - Statement:
+          - Sid: SAMRedshiftModifyPolicy
+            Effect: Allow
+            Action:
+            - redshift:ModifyClusterIamRoles
+            - redshift:CreateCluster
+            - redshift:DescribeClusters
+            Resource: !Sub 'arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:cluster:${RedshiftCluster}'
+          - Sid: SAMRedshiftDataAccessPolicy
+            Effect: Allow
+            Action:
+            - redshift-data:BatchExecuteStatement
+            - redshift-data:ExecuteStatement
+            - redshift-data:CancelStatement
+            - redshift-data:ListStatements
+            - redshift-data:GetStatementResult
+            - redshift-data:DescribeStatement
+            - redshift-data:ListDatabases
+            - redshift-data:ListSchemas
+            - redshift-data:ListTables
+            - redshift-data:DescribeTable
+            Resource: "*"
+          - Sid: SecretManagerHistoricalCrawler
+            Effect: Allow
+            Action:
+            - secretsmanager:*
+            Resource: !Ref RedshiftSecret
+
+  CreateAndActivateDetector:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/create-and-activate-detector/
+      Handler: create-and-activate-detector.lambda_handler
+      Runtime: python3.9
+      Layers:
+        - !Ref SharedLayer
+      Policies:
+        - AmazonLookoutMetricsFullAccess
+        - CloudWatchFullAccess
+        - AmazonS3FullAccess
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - lookoutmetrics:*
+                - iam:PassRole
+                - s3:*
+              Resource: "*"
+
+  Notify:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambdas/notify/
+      Handler: notify.lambda_handler
+      Runtime: python3.9
+
+  StatesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                  - s3:*
+                  - lookoutmetrics:*
+                  - iam:PassRole
+                Resource: "*"
+
+  DeployStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt [StatesExecutionRole, Arn]
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "StartAt": "Historical Data Crawl",
+              "States": {
+                "Historical Data Crawl": {
+                  "Type": "Task",
+                  "Resource": "${HistoricalCrawlArn}",
+                  "InputPath": "$.params",
+                  "ResultPath": "$.params.crawl",
+                  "Catch": [{
+                    "ErrorEquals": ["ResourceFailed"],
+                    "ResultPath": "$.serviceError",
+                    "Next": "Fail"
+                  }],
+                  "Next": "Create and Activate Detector"
+                },
+                "Create and Activate Detector": {
+                  "Type": "Task",
+                  "Resource": "${CreateAndActivateDetectorArn}",
+                  "InputPath": "$.params",
+                  "ResultPath": "$.params",
+                  "Catch": [{
+                    "ErrorEquals": ["ResourceFailed"],
+                    "ResultPath": "$.serviceError",
+                    "Next": "Fail"
+                  }],
+                  "End": true
+                },
+                "Fail": {
+                  "Type": "Task",
+                  "Resource": "${NotifyArn}",
+                  "End": true
+                }
+              }
+            }
+          - HistoricalCrawlArn: !GetAtt RedshiftHistoricalCrawl.Arn
+            CreateAndActivateDetectorArn: !GetAtt CreateAndActivateDetector.Arn
+            NotifyArn: !GetAtt Notify.Arn
+
+# ------------------------
+# Outputs
+# ------------------------
+Outputs:
+  InputBucketName:
+    Description: The S3 bucket name for storing input data
+    Value: !Ref InputBucket
+  S3AccessPolicy:
+    Description: Policy for accessing new s3 Bucket
+    Value: !Ref LookoutS3Policy
+  LookoutForMetricsRole:
+      Description: The role for L4M to use
+      Value: !Ref LookoutForMetricsRole
+  LookoutForMetricsRoleArn:
+    Description: The role arn for L4M to use
+    Value: !GetAtt LookoutForMetricsRole.Arn
+  SageMakerNotebookS3BucketWritePolicy:
+    Description: Policy for Sagemaker Notebooks to write to new input bucket
+    Value: !Ref SageMakerNotebookS3BucketWritePolicy

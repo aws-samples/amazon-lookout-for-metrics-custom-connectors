@@ -89,12 +89,12 @@ After completing the tutorial you can continue reading below for guidance on ext
 Start by clicking the first `Launch Stack` button below. All default options are fine, it will take a few minutes to complete. When the stack shows `CREATE_COMPLETE`
 your account will now contain a production like Redshift environment and you are ready to move onto the next phase.
 
-[![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?stackName=ProductionRedshiftDemo&templateURL=https://lookoutformetricsbucket.s3.amazonaws.com/l4m-redshift-sagemakernotebook.yaml)
+[![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?stackName=ProductionRedshiftDemo&templateURL=https://lookoutformetricsbucket.s3.amazonaws.com/l4m-redshift-sagemakernotebook.yaml){:target="_blank"}
 
 ### Building and Deploying the Custom Connector
 1. From the output tab of the above template, obtain the values for `RedshiftCluster` and `RedshiftSecret`, simply copying them to a text file is fine.
 2. Deploy the next template by clicking the next `Launch Stack` button, on the second page of this wizard update the value provided for `RedshiftCluster` and `RedshiftSecret` with the one you copied above, everything else default is fine.
-[![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?stackName=CustomRedshiftConnector&templateURL=https://lookoutformetricsbucket.s3.amazonaws.com/l4m-redshift-solution.yaml)
+[![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/new?stackName=CustomRedshiftConnector&templateURL=https://lookoutformetricsbucket.s3.amazonaws.com/l4m-redshift-solution.yaml){:target="_blank"}
 3. Wait a while, this entire setup can take from 20-40 minutes to complete until your Detector is visible. You'll know that the CloudFormation part is complete when `custom-rs-connector-crawl`
 exists and has a status of `CREATE_COMPLETE`. From there it should take only 10 minutes or so before the Lookout for Metrics Detector of `l4m-custom-redshift-connector-detector` exits.
 
